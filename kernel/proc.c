@@ -132,6 +132,12 @@ found:
     return 0;
   }
 
+  if((p->usyscall_pa = (uint64)kalloc()) == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -158,8 +164,12 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if(p->usyscall_pa)
+    kfree((void*)p->usyscall_pa);
+  p->usyscall_pa = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+    
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -202,6 +212,20 @@ proc_pagetable(struct proc *p)
     return 0;
   }
 
+  // 实验二需要添加的代码
+  if(mappages(pagetable, USYSCALL, PGSIZE,
+              (uint64)(p->usyscall_pa), PTE_R | PTE_U) < 0){
+    uvmunmap(pagetable, TRAPFRAME, 1, 0);
+    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+    uvmfree(pagetable, 0);
+    return 0;
+  }
+
+  // Initialize the usyscall struct with the process's PID.
+  // 实验二需要添加的代码
+  struct usyscall *u = (struct usyscall*)p->usyscall_pa;
+  u->pid = p->pid;
+
   return pagetable;
 }
 
@@ -212,6 +236,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
+  uvmunmap(pagetable, USYSCALL, 1, 0);
   uvmfree(pagetable, sz);
 }
 
@@ -264,7 +289,7 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
+    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_R | PTE_W | PTE_U)) == 0) {
       return -1;
     }
   } else if(n < 0){

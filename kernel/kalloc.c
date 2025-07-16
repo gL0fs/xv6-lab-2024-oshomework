@@ -23,11 +23,29 @@ struct {
   struct run *freelist;
 } kmem;
 
+#define NSUPERPAGE 8
+#define SUPERPAGE_POOL_START (PHYSTOP - (NSUPERPAGE * SUPERPGSIZE))
+
+struct {
+  struct spinlock lock;
+  char used[NSUPERPAGE];
+} spmem;
+
+void
+spinit()
+{
+  initlock(&spmem.lock, "spmem");
+  for(int i = 0; i < NSUPERPAGE; i++) {
+    spmem.used[i] = 0;
+  }
+}
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)PHYSTOP);
+  spinit();
+  freerange(end, (void*)SUPERPAGE_POOL_START);
 }
 
 void
@@ -48,7 +66,7 @@ kfree(void *pa)
 {
   struct run *r;
 
-  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= SUPERPAGE_POOL_START)
     panic("kfree");
 
   // Fill with junk to catch dangling refs.
@@ -77,6 +95,41 @@ kalloc(void)
   release(&kmem.lock);
 
   if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
+    memset((char*)r, 5, PGSIZE);
   return (void*)r;
+}
+
+void *
+superalloc(void)
+{
+  acquire(&spmem.lock);
+  for(int i = 0; i < NSUPERPAGE; i++) {
+    if(spmem.used[i] == 0) {
+      spmem.used[i] = 1;
+      release(&spmem.lock);
+      uint64 pa = SUPERPAGE_POOL_START + i * SUPERPGSIZE;
+      memset((void*)pa, 5, SUPERPGSIZE);
+      return (void*)pa;
+    }
+  }
+
+  release(&spmem.lock);
+  return 0;
+}
+
+void
+superfree(void *pa)
+{
+  if(((uint64)pa % SUPERPGSIZE) != 0 || (uint64)pa < SUPERPAGE_POOL_START || (uint64)pa >= PHYSTOP)
+    panic("superfree: invalid pa");
+
+  int idx = ((uint64)pa - SUPERPAGE_POOL_START) / SUPERPGSIZE;
+
+  memset(pa, 1, SUPERPGSIZE);
+
+  acquire(&spmem.lock);
+  if(spmem.used[idx] == 0)
+    panic("superfree: freeing a free page");
+  spmem.used[idx] = 0;
+  release(&spmem.lock);
 }

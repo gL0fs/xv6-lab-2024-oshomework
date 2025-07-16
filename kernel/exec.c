@@ -9,14 +9,18 @@
 
 static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
 
-int flags2perm(int flags)
+// Correctly converts ELF flags to PTE flags.
+static int
+flags2perm(int flags)
 {
-    int perm = 0;
-    if(flags & 0x1)
-      perm = PTE_X;
-    if(flags & 0x2)
-      perm |= PTE_W;
-    return perm;
+  int perm = 0;
+  if(flags & ELF_PROG_FLAG_READ)
+    perm |= PTE_R;
+  if(flags & ELF_PROG_FLAG_WRITE)
+    perm |= PTE_W;
+  if(flags & ELF_PROG_FLAG_EXEC)
+    perm |= PTE_X;
+  return perm;
 }
 
 int
@@ -61,8 +65,12 @@ exec(char *path, char **argv)
       goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
+    
+    // Correctly calculate permissions and add the User bit.
+    int perm = flags2perm(ph.flags) | PTE_U;
+    
     uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz, flags2perm(ph.flags))) == 0)
+    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz, perm)) == 0)
       goto bad;
     sz = sz1;
     if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
@@ -80,7 +88,8 @@ exec(char *path, char **argv)
   // Use the rest as the user stack.
   sz = PGROUNDUP(sz);
   uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
+  // The stack must be readable and writable.
+  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_R | PTE_W | PTE_U)) == 0)
     goto bad;
   sz = sz1;
   uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
@@ -130,7 +139,7 @@ exec(char *path, char **argv)
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
- bad:
+bad:
   if(pagetable)
     proc_freepagetable(pagetable, sz);
   if(ip){

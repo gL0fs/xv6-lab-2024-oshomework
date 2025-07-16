@@ -67,6 +67,9 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+void            spinit(void);
+void*           superalloc(void);
+void            superfree(void*);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -181,6 +184,8 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+int             mappages_super(pagetable_t, uint64, uint64, int);
+uint64          uvmalloc_super(pagetable_t, uint64, uint64, int);
 #if defined(LAB_PGTBL) || defined(SOL_MMAP)
 void            vmprint(pagetable_t);
 #endif

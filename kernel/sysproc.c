@@ -35,16 +35,34 @@ sys_wait(void)
   return wait(p);
 }
 
+// This is the new, simplified implementation that relies on the
+// superpage-aware uvmalloc function.
 uint64
 sys_sbrk(void)
 {
   uint64 addr;
   int n;
-
   argint(0, &n);
-  addr = myproc()->sz;
-  if(growproc(n) < 0)
-    return -1;
+  struct proc *p = myproc();
+  addr = p->sz;
+  
+  if(n > 0){
+    if(p->sz > TRAPFRAME - n) {
+      return -1;
+    }
+    uint64 newsz = uvmalloc(p->pagetable, p->sz, p->sz + n, PTE_R | PTE_W | PTE_U);
+    if(newsz == 0) {
+      return -1;
+    }
+    p->sz = newsz;
+    
+  } else if(n < 0){
+    if((uint64)p->sz + n < 0) {
+      return -1;
+    }
+    p->sz = uvmdealloc(p->pagetable, p->sz, p->sz + n);
+  }
+  
   return addr;
 }
 
