@@ -21,6 +21,8 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  uint ref_counts[PHYSTOP / PGSIZE]; 
+
 } kmem;
 
 void
@@ -52,11 +54,16 @@ kfree(void *pa)
     panic("kfree");
 
   // Fill with junk to catch dangling refs.
+  acquire(&kmem.lock);
+  if(kmem.ref_counts[(uint64)pa / PGSIZE] > 1){
+    kmem.ref_counts[(uint64)pa / PGSIZE]--;
+    release(&kmem.lock);
+    return;
+}
+  kmem.ref_counts[(uint64)pa / PGSIZE] = 0;
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
-
-  acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
   release(&kmem.lock);
@@ -72,11 +79,21 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+    kmem.ref_counts[(uint64)r / PGSIZE] = 1;
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+void incref(uint64 pa) {
+  acquire(&kmem.lock);
+  if (pa >= PHYSTOP)
+    panic("incref");
+  kmem.ref_counts[pa / PGSIZE]++;
+  release(&kmem.lock);
 }
