@@ -10,6 +10,9 @@
 #include "file.h"
 #include "net.h"
 
+#define NRECV_Q 16 
+#define NSOCK 16
+
 // xv6's ethernet and IP addresses
 static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
 static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15);
@@ -19,10 +22,36 @@ static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 
 static struct spinlock netlock;
 
+struct pktq {
+  char *pkts[NRECV_Q];
+  int lens[NRECV_Q];
+  uint head;
+  uint tail;
+  uint count;
+};
+
+struct sock {
+  int bound;           
+  int port;             
+  struct pktq rxq;
+
+};
+
+static struct sock sockets[NSOCK];
+
+void sockinit(void)
+{
+  for (struct sock *s = sockets; s < &sockets[NSOCK]; s++) {
+    s->bound = 0;
+    s->rxq.head = s->rxq.tail = s->rxq.count = 0;
+  }
+}
+
 void
 netinit(void)
 {
   initlock(&netlock, "netlock");
+  sockinit();
 }
 
 
@@ -34,10 +63,43 @@ netinit(void)
 uint64
 sys_bind(void)
 {
-  //
-  // Your code here.
-  //
+  int port;
+  struct sock *s;
+  struct sock *free_s = 0;
 
+  argint(0, &port);
+
+  acquire(&netlock);
+
+  for (s = sockets; s < &sockets[NSOCK]; s++) {
+    if (s->bound && s->port == port) {
+
+      for(int i = 0; i < s->rxq.count; i++) {
+        int index = (s->rxq.head + i) % NRECV_Q;
+        kfree(s->rxq.pkts[index]);
+      }
+      s->rxq.count = 0;
+      s->rxq.head = 0;
+      s->rxq.tail = 0;
+      release(&netlock);
+      return 0;
+    }
+    if (s->bound == 0 && free_s == 0) {
+      free_s = s;
+    }
+  }
+
+  if (free_s) {
+    free_s->bound = 1;
+    free_s->port = port;
+    free_s->rxq.count = 0;
+    free_s->rxq.head = 0;
+    free_s->rxq.tail = 0;
+    release(&netlock);
+    return 0;
+  }
+
+  release(&netlock);
   return -1;
 }
 
@@ -49,11 +111,33 @@ sys_bind(void)
 uint64
 sys_unbind(void)
 {
-  //
-  // Optional: Your code here.
-  //
+  int port;
+  struct sock *s;
 
-  return 0;
+  argint(0, &port);
+
+  acquire(&netlock);
+
+  for (s = sockets; s < &sockets[NSOCK]; s++) {
+    if (s->bound && s->port == port) {
+
+      for(int i = 0; i < s->rxq.count; i++) {
+        int index = (s->rxq.head + i) % NRECV_Q;
+        kfree(s->rxq.pkts[index]);
+      }
+
+      s->bound = 0;
+      s->rxq.count = 0;
+      s->rxq.head = 0;
+      s->rxq.tail = 0;
+      
+      release(&netlock);
+      return 0;
+    }
+  }
+
+  release(&netlock);
+  return -1; 
 }
 
 //
@@ -74,10 +158,64 @@ sys_unbind(void)
 uint64
 sys_recv(void)
 {
-  //
-  // Your code here.
-  //
-  return -1;
+int dport;
+  uint64 src_p, sport_p, buf_p;
+  int maxlen;
+  struct sock *s = 0;
+  
+  argint(0, &dport);
+  argaddr(1, &src_p);
+  argaddr(2, &sport_p);
+  argaddr(3, &buf_p);
+  argint(4, &maxlen);
+
+  acquire(&netlock);
+  for (struct sock *sock_i = sockets; sock_i < &sockets[NSOCK]; sock_i++) {
+    if (sock_i->bound && sock_i->port == dport) {
+      s = sock_i;
+      break;
+    }
+  }
+
+  if (s == 0) {
+    release(&netlock);
+    return -1;
+  }
+
+  while(s->rxq.count == 0){
+    sleep(s, &netlock);
+  }
+
+  char *pkt_buf = s->rxq.pkts[s->rxq.head];
+  s->rxq.head = (s->rxq.head + 1) % NRECV_Q;
+  s->rxq.count--;
+
+  release(&netlock);
+
+  struct ip *iph = (struct ip *)(pkt_buf + sizeof(struct eth));
+
+  int ip_header_len = (iph->ip_vhl & 0x0F) * 4;
+
+  struct udp *udph = (struct udp *)((char *)iph + ip_header_len);
+  
+  uint32 src_ip = ntohl(iph->ip_src);
+  ushort src_port = ntohs(udph->sport);
+
+  int payload_len = ntohs(udph->ulen) - sizeof(struct udp);
+  
+  char *payload = (char *)udph + sizeof(struct udp);
+  int copy_len = (payload_len < maxlen) ? payload_len : maxlen;
+
+  if(copyout(myproc()->pagetable, src_p, (char *)&src_ip, sizeof(src_ip)) < 0 ||
+     copyout(myproc()->pagetable, sport_p, (char *)&src_port, sizeof(src_port)) < 0 ||
+     copyout(myproc()->pagetable, buf_p, payload, copy_len) < 0) {
+    kfree(pkt_buf);
+    return -1;
+  }
+  
+  kfree(pkt_buf);
+
+  return copy_len;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
@@ -188,10 +326,36 @@ ip_rx(char *buf, int len)
     printf("ip_rx: received an IP packet\n");
   seen_ip = 1;
 
-  //
-  // Your code here.
-  //
-  
+  struct ip *iph = (struct ip *)(buf + sizeof(struct eth));
+
+  if (iph->ip_p != IPPROTO_UDP) {
+    kfree(buf);
+    return;
+  }
+
+  int ip_header_len = (iph->ip_vhl & 0x0F) * 4;
+  struct udp *udph = (struct udp *)((char *)iph + ip_header_len);
+
+  ushort dport = ntohs(udph->dport);
+
+  acquire(&netlock);
+
+  for (struct sock *s = sockets; s < &sockets[NSOCK]; s++) {
+    if (s->bound && s->port == dport) {
+      if (s->rxq.count < NRECV_Q) {
+        s->rxq.pkts[s->rxq.tail] = buf;
+        s->rxq.lens[s->rxq.tail] = len;
+        s->rxq.tail = (s->rxq.tail + 1) % NRECV_Q;
+        s->rxq.count++;
+        wakeup(s);
+        release(&netlock);
+        return;
+      }
+    }
+  }
+
+  release(&netlock);
+  kfree(buf);
 }
 
 //
