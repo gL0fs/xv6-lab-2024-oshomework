@@ -5,6 +5,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "kernel/fcntl.h"
+#include "kernel/file.h"
 
 struct cpu cpus[NCPU];
 
@@ -124,6 +126,10 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+
+  for (int i = 0; i < NVMA; i++) {
+    p->vmas[i].len = 0;
+  }
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -320,6 +326,13 @@ fork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].len > 0) {
+      np->vmas[i] = p->vmas[i];
+      np->vmas[i].f = filedup(p->vmas[i].f);
+    }
+  }
+
   release(&np->lock);
 
   return pid;
@@ -350,6 +363,24 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+for (int i = 0; i < NVMA; i++) {
+  struct vma *vma = &p->vmas[i];
+  if (vma->len > 0) {
+    uint64 start_page = PGROUNDDOWN(vma->addr);
+    uint64 end_page = PGROUNDUP(vma->addr + vma->len);
+
+    for (uint64 a = start_page; a < end_page; a += PGSIZE) {
+      pte_t *pte = walk(p->pagetable, a, 0);
+      if (pte != 0 && (*pte & PTE_V)) {
+        uvmunmap(p->pagetable, a, 1, 0);
+      }
+    }
+
+    fileclose(vma->f);
+    vma->len = 0;
+  }
+}
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
